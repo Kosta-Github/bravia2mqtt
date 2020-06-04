@@ -1,22 +1,16 @@
 #!/usr/bin/env node
 
-import log from 'yalm';
-import MQTT from 'mqtt';
+const MQTT = require('mqtt');
+const BraviaDiscovery = require('bravia-simple-ip-control').default;
 
-import BraviaDiscovery from 'bravia-simple-ip-control';
-import { Observable } from 'rxjs';
-
-import config from './config.js';
-
-log.setLevel(config.verbosity);
+const config = require('./config.js');
 
 BraviaDiscovery
     .on('founddevice', setupNewDevice)
     .on('lostdevice',  forgetDevice)
     .discover();
 
-let clients = { };
-let subjects = { };
+const clients = { };
 
 const STATUS_OPTS = { qos: 2, retain: true };
 
@@ -24,8 +18,14 @@ function getTopic(dev, suffix) {
     return `${config.name}:${dev.id}/${suffix}`;
 }
 
+function publishMessage({ topic, message, client, retain }) {
+    console.log(`publish: ${topic}: ${message}`);
+    client.publish(topic, message !== null ? message.toString() : null, { qos: 2, retain });
+}
+
 function setupNewDevice(device) {
-    log.debug(`Creating client for ${device.id}`);
+    console.log(`Creating client for: ${device.id}`);
+
     let client = clients[device.id];
     if (!client) {
         client = clients[device.id] = MQTT.connect(config.broker, {
@@ -37,18 +37,10 @@ function setupNewDevice(device) {
         });
     }
 
-    client.publish(getTopic(device, 'connected'), '2', STATUS_OPTS);
+    publishMessage({ client, topic: getTopic(device, 'connected'), message: '2', retain: true })
 
-    const getEventHandler = topic => {
-        return function(value) {
-            publishMessage({
-                topic: getTopic(device, topic),
-                message: value,
-                client,
-                retain: true
-            });
-        }
-    };
+    const getEventHandler = topic => value =>
+        publishMessage({ client, topic: getTopic(device, topic), message: value, retain: true });
 
     device
         .on("power-changed",       getEventHandler('status/isOn'))
@@ -59,34 +51,37 @@ function setupNewDevice(device) {
         .on("piture-mute-changed", getEventHandler('status/isPictureMuted'))
         .on("pip-changed",         getEventHandler('status/isPipEnabled'))
 
-    console.dir(device);
-    getMessages(client, getTopic(device, 'set/#'), getTopic(device, 'get/#'), getTopic(device, 'toggle/#'))
-        .catch((_, caught) => caught)
-        .subscribe(({ topic, message }) => {
-            let match = topic.match(/([sg]et|toggle)\/(.*)$/);
-            if (match) {
-                let [, command, func] = match;
+    const topics = [getTopic(device, 'set/#'), getTopic(device, 'get/#'), getTopic(device, 'toggle/#')];
+    client.subscribe(topics);
 
-                let obj = device[func];
-                if (typeof obj !== 'undefined') {
-                    let cmd;
-                    if (typeof obj === 'function') {
-                        cmd = obj;
-                    } else if (command in obj) {
-                        cmd = obj[command];
-                    }
+    client.on('message', (topic, msg) => {
+        const message = msg.toString();
+        const match = topic.match(/(set|get|toggle)\/(.*)$/);
 
-                    cmd && cmd(message)
-                                .subscribe(
-                                    getEventHandler(`status/${func}`)
-                                );
+        console.log(`received: ${topic}: ${message}`);
+
+        if (match) {
+            const [, command, func] = match;
+
+            const obj = device[func];
+            if (typeof obj !== 'undefined') {
+                let cmd;
+                if (typeof obj === 'function') {
+                    cmd = obj;
+                } else if (command in obj) {
+                    cmd = obj[command];
                 }
+
+                cmd && cmd(message).subscribe(getEventHandler(`status/${func}`));
             }
-        })
+        }
+    })
 }
 
 function forgetDevice(device) {
-    clients[device.id].publish(getTopic(device, 'connected'), '1', STATUS_OPTS);
+    console.log(`Removing client for: ${device.id}`);
+
+    publishMessage({ client: clients[device.id], topic: getTopic(device, 'connected'), message: '1', retain: true });
 
     [
         "power-changed",
@@ -97,36 +92,5 @@ function forgetDevice(device) {
         "piture-mute-changed",
         "pip-changed"
     ]
-    .forEach(::device.removeAllListeners);
-}
-
-function publishMessage({ topic, message, client, retain }) {
-    client.publish(topic, message !== null ? message.toString() : null, { qos: 2, retain });
-}
-
-function NOOP() { }
-function publishMessages(onError = NOOP, onComplete = NOOP) {
-    return this.subscribe(
-        publishMessage,
-        onError,
-        onComplete
-    );
-}
-
-function getMessages(client, ...topics) {
-    return new Observable(
-        subscriber => {
-            client.subscribe(topics);
-            client.on('message', (m_topic, msg) => {
-                subscriber.next({
-                    topic: m_topic,
-                    message: msg.toString()
-                })
-            });
-
-            return () => {
-                client.unsubscribe(topics);
-            }
-        }
-    );
+    .forEach((e) => device.removeAllListeners(e));
 }

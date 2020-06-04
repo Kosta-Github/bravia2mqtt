@@ -1,6 +1,6 @@
-var pkg = require('../package.json');
+const pkg = require('../package.json');
 
-var config = require('yargs')
+const config = require('yargs')
     .usage(pkg.name + ' ' + pkg.version + '\n' + pkg.description + '\n\nUsage: $0 [options]')
     //.describe('v', 'possible values: "error", "warn", "info", "debug"')
     .describe('h', 'show help')
@@ -22,6 +22,4 @@ var config = require('yargs')
     .help('help')
     .argv;
 
-export {
-    config as default
-};
+module.exports = config;
